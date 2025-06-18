@@ -127,63 +127,120 @@ class PunjabiLyricsExtractor:
             print("Sox not found, skipping advanced audio processing")
             return temp_wav.name
     
-    def extract_gurmukhi_lyrics(self, audio_path: str) -> Dict:
-        """Extract Gurmukhi lyrics using Gemini"""
-        print("Extracting Gurmukhi lyrics with Gemini...")
+    def extract_gurmukhi_lyrics_and_metadata(self, audio_path: str) -> Dict:
+        """Extract Gurmukhi lyrics and metadata"""
+        print("Extracting Gurmukhi lyrics and metadata with Gemini...")
         
         # Upload audio file
         audio_file = genai.upload_file(path=audio_path)
         
-        prompt = """You are an expert in Punjabi music and Gurmukhi script.
+        prompt = """<task>
+<role>You are an expert in Punjabi music and Gurmukhi script with perfect transcription abilities.</role>
 
-        CRITICAL INSTRUCTIONS:
-        - Output ONLY clean Gurmukhi text, NO markdown formatting
-        - NO code blocks (```), NO JSON structure, NO extra formatting
-        - Just the raw Gurmukhi lyrics with line breaks
+<objective>Listen to this Punjabi song and extract both lyrics and metadata accurately.</objective>
+
+<examples>
+<example_1>
+Audio: Folk song with clear vocals
+<output>
+<title>Mera Laung Gawacha</title>
+<artist>Satinder Sartaaj</artist>
+<lyrics_gurmukhi>
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+</lyrics_gurmukhi>
+</output>
+</example_1>
+
+<example_2>
+Audio: Modern song with unclear artist
+<output>
+<title>Jatt Da Muqabala</title>
+<artist>Unknown</artist>
+<lyrics_gurmukhi>
+ਜੱਟ ਦਾ ਮੁਕਾਬਲਾ ਕੌਣ ਕਰੇਗਾ
+ਸ਼ੇਰ ਦਾ ਸਾਹਮਣਾ ਕੌਣ ਕਰੇਗਾ
+[?] ਸ਼ਬਦ ਸਪਸ਼ਟ ਨਹੀਂ
+ਜੱਟ ਦਾ ਮੁਕਾਬਲਾ ਕੌਣ ਕਰੇਗਾ
+</lyrics_gurmukhi>
+</output>
+</example_2>
+</examples>
+
+<constraints>
+<must_do>
+- Transcribe ONLY sung lyrics in clean Gurmukhi script
+- Each lyric line on separate line
+- Include repeated sections each occurrence
+- Use [?] only for genuinely unclear words
+- Preserve exact vocal phrasing and repetition
+</must_do>
+
+<must_not_do>
+- Include instrumental sections or music descriptions
+- Add markdown formatting, code blocks, or JSON
+- Guess unclear lyrics instead of using [?]
+- Add explanations or commentary
+- Mix languages within the Gurmukhi text
+</must_not_do>
+</constraints>
+
+<metadata_rules>
+<title>Use recognizable song title or "Unknown" if unclear</title>
+<artist>Use recognizable artist name or "Unknown" if unclear</artist>
+<when_uncertain>Always prefer "Unknown" over guessing</when_uncertain>
+</metadata_rules>
+
+<output_format>
+GOOD:
+<title>Mera Laung Gawacha</title>
+<artist>Satinder Sartaaj</artist>
+<lyrics_gurmukhi>
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+</lyrics_gurmukhi>
+
+BAD:
+```
+{
+  "title": "Mera Laung Gawacha",
+  "lyrics": "ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ\nਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ"
+}
+```
+
+BAD:
+**Title:** Mera Laung Gawacha
+**Artist:** Satinder Sartaaj
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+</output_format>
+</task>"""
         
-        Listen to this Punjabi song and transcribe ONLY the sung lyrics in Gurmukhi script (ਪੰਜਾਬੀ):
-        1. Write each line of lyrics on a separate line
-        2. Ignore instrumental sections
-        3. Include repeated sections each time they appear
-        4. Use [?] for unclear words only
-        5. No extra text, explanations, or formatting
+        response_text = self.validate_and_retry_response(prompt, audio_file)
         
-        Example output format:
-        ਪਹਿਲੀ ਲਾਈਨ ਇੱਥੇ
-        ਦੂਜੀ ਲਾਈਨ ਇੱਥੇ
-        ਤੀਜੀ ਲਾਈਨ ਇੱਥੇ
+        # Parse XML-structured response
+        title = "Unknown"
+        artist = "Unknown"
+        lyrics_text = ""
         
-        Output only clean Gurmukhi text."""
+        # Extract title
+        title_match = re.search(r'<title>(.*?)</title>', response_text, re.DOTALL)
+        if title_match:
+            title = title_match.group(1).strip()
         
-        lyrics_text = self.validate_and_retry_response(prompt, audio_file)
+        # Extract artist
+        artist_match = re.search(r'<artist>(.*?)</artist>', response_text, re.DOTALL)
+        if artist_match:
+            artist = artist_match.group(1).strip()
         
-        # Try to extract title/artist with a separate prompt
-        meta_prompt = """Listen to this Punjabi song and identify:
-        - Song title (if recognizable)
-        - Artist name (if recognizable)
-        
-        Respond in this exact format:
-        Title: [song title or "Unknown"]
-        Artist: [artist name or "Unknown"]"""
-        
-        try:
-            meta_response = self.model.generate_content([meta_prompt, audio_file])
-            meta_text = meta_response.text.strip()
-            
-            title = "Unknown"
-            artist = "Unknown"
-            
-            title_match = re.search(r'Title:\s*(.+)', meta_text)
-            artist_match = re.search(r'Artist:\s*(.+)', meta_text)
-            
-            if title_match:
-                title = title_match.group(1).strip()
-            if artist_match:
-                artist = artist_match.group(1).strip()
-                
-        except:
-            title = "Unknown"
-            artist = "Unknown"
+        # Extract lyrics
+        lyrics_match = re.search(r'<lyrics_gurmukhi>(.*?)</lyrics_gurmukhi>', response_text, re.DOTALL)
+        if lyrics_match:
+            lyrics_text = lyrics_match.group(1).strip()
+        else:
+            # Fallback: use entire response if XML parsing fails
+            lyrics_text = self.clean_text_response(response_text)
         
         return {
             "title": title,
@@ -198,29 +255,116 @@ class PunjabiLyricsExtractor:
         """Autocorrect Gurmukhi text based on context"""
         print("Autocorrecting Gurmukhi text...")
         
-        prompt = f"""You are an expert in Punjabi language and music.
+        prompt = f"""<task>
+<role>You are a Punjabi language expert specializing in Gurmukhi script correction and standardization.</role>
 
-        CRITICAL INSTRUCTIONS:
-        - Output ONLY clean corrected Gurmukhi text
-        - NO markdown formatting, NO explanations, NO extra text
-        - Keep the same line structure as input
-        
-        Review and correct this Gurmukhi transcription:
-        
-        Title: {lyrics_data.get('title', 'Unknown')}
-        Artist: {lyrics_data.get('artist', 'Unknown')}
-        
-        Lyrics to correct:
-        {lyrics_data['lyrics_gurmukhi']}
-        
-        Fix:
-        1. Spelling mistakes in Gurmukhi
-        2. Common transcription errors (ਸ਼/ਸ, ਜ਼/ਜ, etc.)
-        3. Proper use of lagaan maatra (ੱ), bindi (ਂ), tippi (ੰ)
-        4. Word boundaries and spacing
-        5. Maintain original line structure
-        
-        Output only the corrected Gurmukhi text with same line breaks."""
+<objective>Review and correct this Gurmukhi transcription while preserving its original structure and meaning.</objective>
+
+<context>
+<song_title>{lyrics_data.get('title', 'Unknown')}</song_title>
+<artist_name>{lyrics_data.get('artist', 'Unknown')}</artist_name>
+</context>
+
+<examples>
+<example_1>
+<input_with_errors>
+ਮੇਰਾ ਲੌਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿੱਚ ਦੇਸ ਦੇ ਸਾਹੀ
+</input_with_errors>
+<corrected_output>
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+</corrected_output>
+<corrections_made>Missing ਂ in ਲੌਂਗ, wrong ਵਿੱਚ should be ਵਿਚ, missing ਼ in ਦੇਸ਼</corrections_made>
+</example_1>
+
+<example_2>
+<input_with_errors>
+ਜਟ ਦਾ ਮੁਕਾਬਲਾ ਕੋਣ ਕਰੇਗਾ
+ਸੇਰ ਦਾ ਸਾਮਨਾ ਕੋਣ ਕਰੇਗਾ
+</input_with_errors>
+<corrected_output>
+ਜੱਟ ਦਾ ਮੁਕਾਬਲਾ ਕੌਣ ਕਰੇਗਾ
+ਸ਼ੇਰ ਦਾ ਸਾਹਮਣਾ ਕੌਣ ਕਰੇਗਾ
+</corrected_output>
+<corrections_made>Missing ੱ in ਜੱਟ, ਕੋਣ to ਕੌਣ, missing ਼ in ਸ਼ੇਰ, ਸਾਮਨਾ to ਸਾਹਮਣਾ</corrections_made>
+</example_2>
+</examples>
+
+<input_lyrics>
+{lyrics_data['lyrics_gurmukhi']}
+</input_lyrics>
+
+<correction_categories>
+<spelling_errors>
+- Common misspellings in Punjabi words
+- Wrong vowel combinations
+- Incorrect consonant clusters
+</spelling_errors>
+
+<diacritic_corrections>
+<lagaan_maatra>ੱ - double consonant marker (ਜੱਟ, ਪੱਤਰ)</lagaan_maatra>
+<bindi>ਂ - nasal sound (ਲੌਂਗ, ਮਾਂ)</bindi>
+<tippi>ੰ - nasal sound (ਰੰਗ, ਗੰਗਾ)</tippi>
+<nukta>਼ - dot below for Persian/Arabic sounds (ਸ਼, ਜ਼, ਖ਼, ਫ਼)</nukta>
+</diacritic_corrections>
+
+<transcription_errors>
+<common_mistakes>ਸ਼/ਸ, ਜ਼/ਜ, ਖ਼/ਖ, ਫ਼/ਫ, ਵ/ਬ, ਰ/ੜ</common_mistakes>
+<vowel_errors>ਿ/ੀ, ੁ/ੂ, ੇ/ੈ, ੋ/ੌ confusion</vowel_errors>
+</transcription_errors>
+
+<structural_preservation>
+<line_breaks>Maintain exact same number of lines</line_breaks>
+<word_spacing>Proper spacing between words</word_spacing>
+<punctuation>Keep existing punctuation marks</punctuation>
+<unclear_sections>Preserve [?] markers for unclear words</unclear_sections>
+</structural_preservation>
+</correction_categories>
+
+<constraints>
+<must_preserve>
+- Original line structure and count
+- Overall meaning and flow
+- [?] markers for unclear sections
+- Poetic rhythm and meter
+</must_preserve>
+
+<must_fix>
+- Spelling errors in standard Punjabi words
+- Missing or incorrect diacritical marks
+- Wrong nukta usage for Persian/Arabic sounds
+- Improper word spacing
+</must_fix>
+
+<must_not_do>
+- Change the meaning of words
+- Add or remove lines
+- Add explanatory text
+- Use markdown or formatting
+- Modernize archaic spellings unnecessarily
+</must_not_do>
+</constraints>
+
+<output_format>
+GOOD:
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+
+BAD:
+```gurmukhi
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+```
+
+BAD:
+**Corrected lyrics:**
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+
+BAD:
+Here are the corrected lyrics: ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+</output_format>
+</task>"""
         
         corrected_text = self.clean_text_response(self.model.generate_content(prompt).text)
         lyrics_data['lyrics_gurmukhi_corrected'] = corrected_text
@@ -248,32 +392,140 @@ class PunjabiLyricsExtractor:
         """Translate Gurmukhi to English with context awareness"""
         print("Translating to English...")
         
-        prompt = f"""Translate this Punjabi song from Gurmukhi to English.
+        prompt = f"""<task>
+<role>You are a expert literary translator specializing in Punjabi-English translation with deep cultural knowledge.</role>
 
-        CRITICAL INSTRUCTIONS:
-        - Output ONLY the English translation
-        - NO markdown formatting, NO explanations, NO extra text
-        - Keep the same line structure as the Gurmukhi input
-        - One English line for each Gurmukhi line
-        
-        Context:
-        - Title: {context.get('title', 'Unknown')}
-        - Artist: {context.get('artist', 'Unknown')}
-        
-        Gurmukhi text to translate:
-        {gurmukhi_text}
-        
-        Guidelines:
-        1. Preserve poetic meaning and emotion
-        2. Keep cultural references with brief explanations in brackets
-        3. Maintain exact line structure (line-by-line translation)
-        4. Translate idioms appropriately
-        5. Natural English flow
-        
-        Output only the English translation with same line breaks."""
+<objective>Translate this Punjabi song from Gurmukhi to English while preserving its poetic essence, cultural nuances, and emotional depth.</objective>
+
+<context>
+<song_title>{context.get('title', 'Unknown')}</song_title>
+<artist_name>{context.get('artist', 'Unknown')}</artist_name>
+<genre>Traditional/Folk/Modern Punjabi music</genre>
+</context>
+
+<examples>
+<example_1>
+<gurmukhi_input>
+ਮੇਰਾ ਲੌਂਗ ਗਵਾਚਾ ਮਾਹੀ
+ਤੇਰੇ ਵਿਚ ਦੇਸ਼ ਦੇ ਸਾਹੀ
+</gurmukhi_input>
+<english_output>
+My earring got lost, beloved
+In your country, oh king
+</english_output>
+<translation_notes>ਮਾਹੀ = beloved/dear one, ਸਾਹੀ = king/ruler - preserved emotional intimacy</translation_notes>
+</example_1>
+
+<example_2>
+<gurmukhi_input>
+ਜੱਟ ਦਾ ਮੁਕਾਬਲਾ ਕੌਣ ਕਰੇਗਾ
+ਸ਼ੇਰ ਦਾ ਸਾਹਮਣਾ ਕੌਣ ਕਰੇਗਾ
+</gurmukhi_input>
+<english_output>
+Who will compete with this Jatt [Punjabi farmer-warrior]
+Who will face this lion
+</english_output>
+<translation_notes>ਜੱਟ kept with cultural explanation, ਸ਼ੇਰ = lion (metaphor for brave person)</translation_notes>
+</example_2>
+
+<example_3>
+<gurmukhi_input>
+ਸਤਿਗੁਰੂ ਨਾਨਕ ਪ੍ਰਗਟਿਆ ਮਿਟੀ ਧੁੰਧ ਜਗ ਚਾਨਣ ਹੋਆ
+[?] ਸ਼ਬਦ ਸਪਸ਼ਟ ਨਹੀਂ
+</gurmukhi_input>
+<english_output>
+True Guru Nanak appeared, the mist cleared and the world became illuminated
+[?] word unclear
+</english_output>
+<translation_notes>Religious context preserved, [?] maintained for unclear words</translation_notes>
+</example_3>
+</examples>
+
+<input_gurmukhi>
+{gurmukhi_text}
+</input_gurmukhi>
+
+<translation_principles>
+<poetic_preservation>
+<rhythm>Maintain natural rhythm and flow in English</rhythm>
+<imagery>Preserve metaphors and poetic imagery</imagery>
+<emotion>Capture the emotional tone and intensity</emotion>
+<repetition>Maintain repetitive elements and refrains</repetition>
+</poetic_preservation>
+
+<cultural_handling>
+<religious_terms>Preserve Sikh/Hindu/Islamic religious terms with context</religious_terms>
+<punjabi_concepts>Keep uniquely Punjabi concepts with brief explanations in brackets</punjabi_concepts>
+<honorifics>Translate titles and honorifics appropriately (ਜੀ, ਸਾਹਿਬ, etc.)</honorifics>
+<regional_refs>Maintain references to Punjab, villages, etc.</regional_refs>
+</cultural_handling>
+
+<linguistic_accuracy>
+<idioms>Convert Punjabi idioms to equivalent English expressions where possible</idioms>
+<wordplay>Attempt to preserve puns and wordplay when feasible</wordplay>
+<archaic_terms>Handle old Punjabi terms with appropriate English equivalents</archaic_terms>
+<unclear_words>Preserve [?] markers exactly as they appear</unclear_words>
+</linguistic_accuracy>
+
+<structural_requirements>
+<line_correspondence>One English line for each Gurmukhi line</line_correspondence>
+<line_count>Same number of lines as input</line_count>
+<spacing>Maintain blank lines and spacing from original</spacing>
+<punctuation>Add appropriate English punctuation for clarity</punctuation>
+</structural_requirements>
+</translation_principles>
+
+<constraints>
+<must_preserve>
+- Exact line structure and count
+- Cultural and religious significance
+- Emotional depth and poetic beauty
+- [?] markers for unclear sections
+- Overall meaning and message
+</must_preserve>
+
+<must_achieve>
+- Natural English flow and readability
+- Cultural accessibility for English speakers
+- Appropriate register (formal/informal/poetic)
+- Consistent terminology throughout
+</must_achieve>
+
+<must_avoid>
+- Literal word-for-word translation
+- Loss of cultural context
+- Awkward or unnatural English phrasing
+- Adding explanatory text outside brackets
+- Changing the fundamental meaning
+</must_avoid>
+</constraints>
+
+<output_format>
+GOOD:
+My earring got lost, beloved
+In your country, oh king
+
+BAD:
+```
+My earring got lost, beloved
+In your country, oh king
+```
+
+BAD:
+**English Translation:**
+My earring got lost, beloved
+In your country, oh king
+
+BAD:
+Here is the English translation:
+My earring got lost, beloved
+In your country, oh king
+</output_format>
+</task>"""
         
         english_text = self.clean_text_response(self.model.generate_content(prompt).text)
         return english_text
+    
     
     def smart_line_alignment(self, gurmukhi_text: str, romanized_text: str, english_text: str) -> List[Dict]:
         """Smart line alignment with filtering and validation"""
@@ -360,26 +612,26 @@ class PunjabiLyricsExtractor:
         print(f"Processing: {Path(mp3_path).name}")
         print(f"{'='*50}\n")
         
-        # Step 1: Preprocess audio
+        # Preprocess audio
         processed_audio = self.preprocess_audio(mp3_path)
         
         try:
-            # Step 2: Extract Gurmukhi lyrics
-            lyrics_data = self.extract_gurmukhi_lyrics(processed_audio)
+            # Extract Gurmukhi lyrics and metadata
+            lyrics_data = self.extract_gurmukhi_lyrics_and_metadata(processed_audio)
             
-            # Step 3: Autocorrect Gurmukhi
+            # Autocorrect Gurmukhi
             lyrics_data = self.autocorrect_gurmukhi(lyrics_data)
             
-            # Step 4: Romanize
+            # Romanize text
             romanized = self.romanize_text(lyrics_data['lyrics_gurmukhi_corrected'])
             
-            # Step 5: Translate to English
+            # Translate to English
             english = self.translate_to_english(
                 lyrics_data['lyrics_gurmukhi_corrected'],
                 lyrics_data
             )
             
-            # Step 6: Create structured output
+            # Create structured output
             result = self.create_structured_output(lyrics_data, romanized, english)
             
             # Save to file if output path provided
@@ -420,11 +672,11 @@ class PunjabiLyricsExtractor:
 def main():
     """CLI interface"""
     if len(sys.argv) < 2:
-        print("Usage: python punjabi_lyrics_extractor.py <mp3_file> [output_json]")
+        print("Usage: uv run python punjabi_lyrics_extractor.py <mp3_file>")
+        print("Output will be saved to: outputs/<filename>_lyrics.json")
         sys.exit(1)
     
     mp3_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else None
     
     # Load environment variables from .env file
     from dotenv import load_dotenv
@@ -438,33 +690,17 @@ def main():
     
     # Process the song
     extractor = PunjabiLyricsExtractor(api_key)
-    result = extractor.process_song(mp3_file, output_file)
+    result = extractor.process_song(mp3_file)
     
-    # Also save to a default location with v2 naming for comparison
-    default_output = Path(mp3_file).stem + "_lyrics_v2.json"
-    with open(default_output, 'w', encoding='utf-8') as f:
+    # Save to outputs folder
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(exist_ok=True)
+    
+    # Save result with clean naming
+    output_file = outputs_dir / f"{Path(mp3_file).stem}_lyrics.json"
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nAlso saved to: {default_output}")
-    
-    # Compare with original if it exists
-    original_file = Path(mp3_file).stem + "_lyrics.json"
-    if Path(original_file).exists():
-        try:
-            from quality_validator import LyricsQualityValidator
-            validator = LyricsQualityValidator()
-            
-            with open(original_file, 'r', encoding='utf-8') as f:
-                old_result = json.load(f)
-            
-            comparison = validator.compare_results(old_result, result)
-            
-            print(f"\n=== QUALITY COMPARISON ===")
-            print(f"Original score: {comparison['old_scores']['overall']:.2f}")
-            print(f"New (v2) score: {comparison['new_scores']['overall']:.2f}")
-            print(f"Improvement: {comparison['improvements']['overall']['change']:.2f}")
-            
-        except Exception as e:
-            print(f"Could not compare with original: {e}")
+    print(f"\nOutput saved to: {output_file}")
 
 
 if __name__ == "__main__":
