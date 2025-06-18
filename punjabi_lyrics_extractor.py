@@ -7,6 +7,7 @@ Extracts and translates Punjabi song lyrics from MP3 files using Gemini AI
 import os
 import json
 import sys
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -33,8 +34,53 @@ class PunjabiLyricsExtractor:
         """Initialize the extractor with Gemini API key"""
         self.api_key = gemini_api_key
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         self.translator = Translator()
+        
+    def clean_text_response(self, text: str) -> str:
+        """Clean LLM response text from formatting artifacts"""
+        if not text:
+            return ""
+            
+        # Remove markdown code blocks
+        text = re.sub(r'```[a-zA-Z]*\n?', '', text)
+        text = re.sub(r'```\n?', '', text)
+        
+        # Remove JSON structure artifacts
+        text = re.sub(r'^\s*\{.*?"lyrics_gurmukhi":\s*"', '', text, flags=re.DOTALL)
+        text = re.sub(r'",?\s*\}?\s*$', '', text)
+        text = re.sub(r'^\s*"([^"]*)":\s*"', '', text)
+        
+        # Clean up escaped characters
+        text = text.replace('\\n', '\n')
+        text = text.replace('\\"', '"')
+        
+        # Remove leading/trailing quotes
+        text = text.strip().strip('"\'')
+        
+        # Clean up multiple newlines
+        text = re.sub(r'\n\s*\n', '\n', text)
+        
+        return text.strip()
+    
+    def validate_and_retry_response(self, prompt: str, audio_file, max_retries: int = 2) -> str:
+        """Validate LLM response and retry if needed"""
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.model.generate_content([prompt, audio_file])
+                cleaned_text = self.clean_text_response(response.text)
+                
+                # Basic validation
+                if len(cleaned_text) > 20 and not cleaned_text.startswith('{'):
+                    return cleaned_text
+                    
+                print(f"Response validation failed (attempt {attempt + 1}), retrying...")
+                
+            except Exception as e:
+                print(f"API call failed (attempt {attempt + 1}): {e}")
+                
+        # Return last attempt even if not perfect
+        return cleaned_text if 'cleaned_text' in locals() else ""
         
     def preprocess_audio(self, mp3_path: str) -> str:
         """Preprocess audio for better transcription"""
@@ -58,14 +104,26 @@ class PunjabiLyricsExtractor:
         # Optional: Apply noise reduction using sox (if installed)
         try:
             processed_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            subprocess.run([
+            print(f"Running sox noise reduction...")
+            print(f"Input file: {temp_wav.name}")
+            print(f"Output file: {processed_wav.name}")
+            
+            result = subprocess.run([
                 'sox', temp_wav.name, processed_wav.name,
-                'noisered', '-', '0.21',
                 'compand', '0.3,1', '6:-70,-60,-20', '-5', '-90', '0.2'
-            ], check=True, capture_output=True)
+            ], check=True, capture_output=True, timeout=30)
+            
+            print(f"Sox completed successfully")
             os.unlink(temp_wav.name)
             return processed_wav.name
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.TimeoutExpired:
+            print("Sox command timed out after 30 seconds")
+            return temp_wav.name
+        except subprocess.CalledProcessError as e:
+            print(f"Sox command failed: {e}")
+            print(f"Stderr: {e.stderr.decode() if e.stderr else 'None'}")
+            return temp_wav.name
+        except FileNotFoundError:
             print("Sox not found, skipping advanced audio processing")
             return temp_wav.name
     
@@ -76,75 +134,96 @@ class PunjabiLyricsExtractor:
         # Upload audio file
         audio_file = genai.upload_file(path=audio_path)
         
-        prompt = """You are an expert in Punjabi music and Gurmukhi script. 
+        prompt = """You are an expert in Punjabi music and Gurmukhi script.
+
+        CRITICAL INSTRUCTIONS:
+        - Output ONLY clean Gurmukhi text, NO markdown formatting
+        - NO code blocks (```), NO JSON structure, NO extra formatting
+        - Just the raw Gurmukhi lyrics with line breaks
         
-        Listen to this Punjabi song and:
-        1. Transcribe ONLY the sung lyrics in Gurmukhi script (ਪੰਜਾਬੀ)
-        2. Ignore any instrumental sections
-        3. Format with proper line breaks for verses/chorus
-        4. Include repeated sections only once with notation like [Chorus x2]
-        5. Note any unclear words with [?]
+        Listen to this Punjabi song and transcribe ONLY the sung lyrics in Gurmukhi script (ਪੰਜਾਬੀ):
+        1. Write each line of lyrics on a separate line
+        2. Ignore instrumental sections
+        3. Include repeated sections each time they appear
+        4. Use [?] for unclear words only
+        5. No extra text, explanations, or formatting
         
-        Output format:
-        {
-            "title": "Song title if recognizable",
-            "artist": "Artist if recognizable", 
-            "lyrics_gurmukhi": "Full Gurmukhi text with line breaks",
-            "sections": [
-                {
-                    "type": "verse/chorus/hook",
-                    "text": "Gurmukhi text for this section",
-                    "repeat_count": 1
-                }
-            ],
-            "confidence": 0.0-1.0,
-            "unclear_sections": ["List of unclear parts"]
-        }
+        Example output format:
+        ਪਹਿਲੀ ਲਾਈਨ ਇੱਥੇ
+        ਦੂਜੀ ਲਾਈਨ ਇੱਥੇ
+        ਤੀਜੀ ਲਾਈਨ ਇੱਥੇ
         
-        Output valid JSON only."""
+        Output only clean Gurmukhi text."""
         
-        response = self.model.generate_content([prompt, audio_file])
+        lyrics_text = self.validate_and_retry_response(prompt, audio_file)
+        
+        # Try to extract title/artist with a separate prompt
+        meta_prompt = """Listen to this Punjabi song and identify:
+        - Song title (if recognizable)
+        - Artist name (if recognizable)
+        
+        Respond in this exact format:
+        Title: [song title or "Unknown"]
+        Artist: [artist name or "Unknown"]"""
         
         try:
-            # Parse JSON from response
-            result = json.loads(response.text)
-            return result
-        except json.JSONDecodeError:
-            # Fallback parsing
-            return {
-                "title": "Unknown",
-                "artist": "Unknown",
-                "lyrics_gurmukhi": response.text,
-                "sections": [],
-                "confidence": 0.5,
-                "unclear_sections": []
-            }
+            meta_response = self.model.generate_content([meta_prompt, audio_file])
+            meta_text = meta_response.text.strip()
+            
+            title = "Unknown"
+            artist = "Unknown"
+            
+            title_match = re.search(r'Title:\s*(.+)', meta_text)
+            artist_match = re.search(r'Artist:\s*(.+)', meta_text)
+            
+            if title_match:
+                title = title_match.group(1).strip()
+            if artist_match:
+                artist = artist_match.group(1).strip()
+                
+        except:
+            title = "Unknown"
+            artist = "Unknown"
+        
+        return {
+            "title": title,
+            "artist": artist,
+            "lyrics_gurmukhi": lyrics_text,
+            "sections": [],
+            "confidence": 0.8 if len(lyrics_text) > 50 else 0.3,
+            "unclear_sections": []
+        }
     
     def autocorrect_gurmukhi(self, lyrics_data: Dict) -> Dict:
         """Autocorrect Gurmukhi text based on context"""
         print("Autocorrecting Gurmukhi text...")
         
         prompt = f"""You are an expert in Punjabi language and music.
+
+        CRITICAL INSTRUCTIONS:
+        - Output ONLY clean corrected Gurmukhi text
+        - NO markdown formatting, NO explanations, NO extra text
+        - Keep the same line structure as input
         
         Review and correct this Gurmukhi transcription:
         
         Title: {lyrics_data.get('title', 'Unknown')}
         Artist: {lyrics_data.get('artist', 'Unknown')}
         
-        Lyrics:
+        Lyrics to correct:
         {lyrics_data['lyrics_gurmukhi']}
         
-        Tasks:
-        1. Fix any spelling mistakes in Gurmukhi
-        2. Correct common transcription errors (ਸ਼/ਸ, ਜ਼/ਜ, etc.)
-        3. Ensure proper use of lagaan maatra (ੱ), bindi (ਂ), tippi (ੰ)
-        4. Fix word boundaries and spacing
-        5. Maintain poetic structure
+        Fix:
+        1. Spelling mistakes in Gurmukhi
+        2. Common transcription errors (ਸ਼/ਸ, ਜ਼/ਜ, etc.)
+        3. Proper use of lagaan maatra (ੱ), bindi (ਂ), tippi (ੰ)
+        4. Word boundaries and spacing
+        5. Maintain original line structure
         
-        Return the corrected text only."""
+        Output only the corrected Gurmukhi text with same line breaks."""
         
-        response = self.model.generate_content(prompt)
-        lyrics_data['lyrics_gurmukhi_corrected'] = response.text.strip()
+        corrected_text = self.clean_text_response(self.model.generate_content(prompt).text)
+        lyrics_data['lyrics_gurmukhi_corrected'] = corrected_text
         
         return lyrics_data
     
@@ -170,44 +249,88 @@ class PunjabiLyricsExtractor:
         print("Translating to English...")
         
         prompt = f"""Translate this Punjabi song from Gurmukhi to English.
+
+        CRITICAL INSTRUCTIONS:
+        - Output ONLY the English translation
+        - NO markdown formatting, NO explanations, NO extra text
+        - Keep the same line structure as the Gurmukhi input
+        - One English line for each Gurmukhi line
         
         Context:
         - Title: {context.get('title', 'Unknown')}
         - Artist: {context.get('artist', 'Unknown')}
         
-        Gurmukhi text:
+        Gurmukhi text to translate:
         {gurmukhi_text}
         
         Guidelines:
-        1. Preserve the poetic meaning and emotion
-        2. Keep cultural references with explanations in brackets
-        3. Maintain verse structure
+        1. Preserve poetic meaning and emotion
+        2. Keep cultural references with brief explanations in brackets
+        3. Maintain exact line structure (line-by-line translation)
         4. Translate idioms appropriately
-        5. Keep the flow natural in English
+        5. Natural English flow
         
-        Provide only the English translation."""
+        Output only the English translation with same line breaks."""
         
-        response = self.model.generate_content(prompt)
-        return response.text.strip()
+        english_text = self.clean_text_response(self.model.generate_content(prompt).text)
+        return english_text
     
+    def smart_line_alignment(self, gurmukhi_text: str, romanized_text: str, english_text: str) -> List[Dict]:
+        """Smart line alignment with filtering and validation"""
+        
+        # Clean and split lines
+        gurmukhi_lines = [line.strip() for line in gurmukhi_text.split('\n') if line.strip()]
+        romanized_lines = [line.strip() for line in romanized_text.split('\n') if line.strip()]
+        english_lines = [line.strip() for line in english_text.split('\n') if line.strip()]
+        
+        # Get the minimum non-zero count to avoid empty padding
+        line_counts = [len(lines) for lines in [gurmukhi_lines, romanized_lines, english_lines] if lines]
+        if not line_counts:
+            return []
+            
+        target_count = max(line_counts)
+        
+        # Pad shorter lists with empty strings
+        while len(gurmukhi_lines) < target_count:
+            gurmukhi_lines.append("")
+        while len(romanized_lines) < target_count:
+            romanized_lines.append("")
+        while len(english_lines) < target_count:
+            english_lines.append("")
+            
+        # Create aligned line data
+        lines_data = []
+        for i in range(target_count):
+            # Skip lines that are artifacts or clearly broken
+            gurmukhi = gurmukhi_lines[i] if i < len(gurmukhi_lines) else ""
+            romanized = romanized_lines[i] if i < len(romanized_lines) else ""
+            english = english_lines[i] if i < len(english_lines) else ""
+            
+            # Filter out obvious artifacts
+            if any(artifact in gurmukhi.lower() for artifact in ['```', 'json', '{']):
+                continue
+            if any(artifact in romanized.lower() for artifact in ['```', 'json', '{']):
+                continue
+                
+            line_data = {
+                "line_number": len(lines_data) + 1,
+                "gurmukhi": gurmukhi,
+                "romanized": romanized,
+                "english": english
+            }
+            lines_data.append(line_data)
+            
+        return lines_data
+
     def create_structured_output(self, lyrics_data: Dict, romanized: str, english: str) -> Dict:
         """Create structured output for lyrics website"""
         
-        # Split into lines for line-by-line mapping
-        gurmukhi_lines = lyrics_data['lyrics_gurmukhi_corrected'].split('\n')
-        romanized_lines = romanized.split('\n')
-        english_lines = english.split('\n')
-        
-        # Create line-by-line mapping
-        lines_data = []
-        for i in range(max(len(gurmukhi_lines), len(romanized_lines), len(english_lines))):
-            line_data = {
-                "line_number": i + 1,
-                "gurmukhi": gurmukhi_lines[i] if i < len(gurmukhi_lines) else "",
-                "romanized": romanized_lines[i] if i < len(romanized_lines) else "",
-                "english": english_lines[i] if i < len(english_lines) else ""
-            }
-            lines_data.append(line_data)
+        # Use smart line alignment
+        lines_data = self.smart_line_alignment(
+            lyrics_data['lyrics_gurmukhi_corrected'],
+            romanized,
+            english
+        )
         
         structured_output = {
             "metadata": {
@@ -317,11 +440,31 @@ def main():
     extractor = PunjabiLyricsExtractor(api_key)
     result = extractor.process_song(mp3_file, output_file)
     
-    # Also save to a default location for persistence
-    default_output = Path(mp3_file).stem + "_lyrics.json"
+    # Also save to a default location with v2 naming for comparison
+    default_output = Path(mp3_file).stem + "_lyrics_v2.json"
     with open(default_output, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"\nAlso saved to: {default_output}")
+    
+    # Compare with original if it exists
+    original_file = Path(mp3_file).stem + "_lyrics.json"
+    if Path(original_file).exists():
+        try:
+            from quality_validator import LyricsQualityValidator
+            validator = LyricsQualityValidator()
+            
+            with open(original_file, 'r', encoding='utf-8') as f:
+                old_result = json.load(f)
+            
+            comparison = validator.compare_results(old_result, result)
+            
+            print(f"\n=== QUALITY COMPARISON ===")
+            print(f"Original score: {comparison['old_scores']['overall']:.2f}")
+            print(f"New (v2) score: {comparison['new_scores']['overall']:.2f}")
+            print(f"Improvement: {comparison['improvements']['overall']['change']:.2f}")
+            
+        except Exception as e:
+            print(f"Could not compare with original: {e}")
 
 
 if __name__ == "__main__":
